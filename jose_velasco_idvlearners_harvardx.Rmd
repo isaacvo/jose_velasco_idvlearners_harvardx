@@ -1,0 +1,629 @@
+---
+title: 'Machine Learning Applied to Finance: Interest Rate Curve in Mexico'
+author: "Jose Velasco"
+date: "25/11/2020"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Machine Learning Applied to Finance: Interest Rate Curve in Mexico
+
+
+For the final capstone project of the HarvardX - PH125.9x, this paper examines the interest rates market in Mexico. Specifically, it models the 10-year rate in the swap interest rates market. Since different models are used, the accuracy of each model will be assessed using Root Mean Squared Error (RMSE). 
+
+
+## 1 Introduction
+
+Interest rate markets are important to the economy because they shed light on economic matters. For example, by examining the overnight rate and the monetary policy statements of the different central banks, an idea can be formed about the current economic outlook (inflation and growth) and its expected course.
+
+The economic theory also tell us the importance of the shape of the yield curve (commonly comprised of the overnight rate to the 10-year rate). As the US Central Bank (Federal Reserve or Fed for short) noted https://www.chicagofed.org/publications/chicago-fed-letter/2018/404
+the spread between the overnight rate and the long term rates are often regarded as predictors of recessions. 
+
+This paper will attempt to generate models from different approaches in order to obtain a sufficiently good prediction (measured using the RMSE loss function) for the 10yr rate.
+
+First, an exploratory analysis will be conducted. Second, a series of models will be derived, starting from simple models (linear approaches) to machine learning ones (PCA, KNN and Random Forest). Third, the results will be presented comparing the different RMSEs. Last, conclusions and final remarks will be presented.
+
+
+## 2 Methods and Analysis
+
+### 2.1 Data Exploration
+
+First of all, the data is loaded from the provided file. The information is extracted from Bloomberg.
+
+
+```{r loading libraries, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+library("readxl")
+library("zoo")
+library("forecast")
+library("tidyverse")
+library("dplyr")
+library("TTR")
+library("GGally")
+library(tidyverse)
+library(caret)
+library(data.table)
+library(stringr)
+library(xts)
+library(TSstudio)
+```
+
+
+```{r loading data, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+#loading the dataset
+dat <- read_excel("ratesmx.xlsx", sheet = 1, col_names = FALSE)
+dat <- dat[-c(1,2,4,5,6),] #we remove useless rows
+colnames(dat) <- dat[1,] #assign names to columns
+colnames(dat)[1] <- "date" 
+names <- colnames(dat) #store names on a separate vector
+dat <- dat[-c(1),] #remove names
+dat <- as.matrix(dat) #transform to matrix
+num_col <- ncol(dat) #extract the number of columns 
+num_row <- nrow(dat) # extract the number of rows
+dat <- mapply(dat, FUN=as.numeric, nrow = length(dat)) #transform to numeric 
+#using extracted number of rows to preserve dimension
+dat <- matrix(dat, ncol=num_col, nrow=num_row) #create a matrix again
+#using extracted number of columns and rows to preserve dimension
+dat <- data.frame(dat) # as data frame
+dat[,1] <- as.Date(dat[,1], origin = "1899-12-30") #transform column one to dates
+colnames(dat) <- names #restore names
+#now we can work with the data
+```
+
+A quick summary of the data reveals the following:
+
+```{r summary, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+summary(dat)
+```
+
+The data has more than 2,500 observations spanning from January 2010 to September 2020 (more than 10 years of daily observations). Furthermore, there are no missing values.
+
+Here is a description of the variables:
+
+* Index: dates 
+* irs3m: 3 months interest rate swap
+* irs6m: 6 months interest rate swap
+* irs9m: 9 months interest rate swap
+* irs1yr: 1 year interest rate swap
+* irs2yr: 2 years interest rate swap
+* irs3yr: 3 years interest rate swap
+* irs4yr: 4 years interest rate swap
+* irs5yr: 5 years interest rate swap
+* irs6yr: 7 years interest rate swap
+* irs10yr: 10 years interest rate swap
+* overnight: official Mexico central bank interest overnight rate (base rate)
+* fed: official US central bank interest overnight rate (base rate)
+* us10yr: maturity constant 10 years government bond rate
+* tiie28: interbank one month rate for Mexico (base rate for swaps)
+* mxn: exchange rate between us dollar and mexican peso
+* g1yr to g30yr: constant maturity government bond rates for Mexico
+
+The database provides two 10yr rates for Mexico: the IRS (interest rate swaps) and the government 10yr rate. The first one will be chosen for the model because irs  rates present some advantages over government bonds. First of all, they are traded with constant maturity. This means that the observed rates are the actual level for a specific date on that instrument. In contrast, government bonds have specific maturity dates, for example, the current 10yr bond (or on the run bond) has a maturity date of May 2029, which means that it cannot be used as the 10yr bond if the analysis starts in 2010, since it would be the 20yr bond. For this reason, bloomberg calculates a theoretical 10yr government bond rate, taking into account the "on the run bond", which changes from time to time. This means that the g1yr to g30yr are theoretical levels for that instruments. Hence, the choice of the IRS over the government bonds.
+
+Regarding the IRS curve, we have information for 10 different nodes, spanning from 3 months to 10 years.
+
+```{r boxplot irs, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+boxplot((dat[,2:11])) #boxplot of the IRS curve
+```
+
+
+The following visual examination shows the relationship between term and spread. The longer the maturity of the asset, the higher the premium vs the overnight rate. Note that this relation tends to hold under normal conditions. Under stress coditions or tightening monetary policy cycles (i.e. policy rate cuts) as in 2018-2019, the relationship tends to inverse.
+
+```{r graph, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+#graph of the historical values of the IRS curve
+dat %>%
+  ggplot(aes(x = date)) + 
+  geom_line(aes(y = overnight), colour="#000000") +
+  geom_line(aes(y = irs3m), colour="#2F4F4F") +
+  geom_line(aes(y = irs6m), colour="#708090") +
+  geom_line(aes(y = irs9m), colour="#778899") +
+  geom_line(aes(y = irs1yr), colour="#696969") +
+  geom_line(aes(y = irs2yr), colour="#808080") +
+  geom_line(aes(y = irs3yr), colour="#A9A9A9") +
+  geom_line(aes(y = irs4yr), colour="#C0C0C0") +
+  geom_line(aes(y = irs5yr), colour="#0000FF") +
+  geom_line(aes(y = irs7yr), colour="#6495ED") +
+  geom_line(aes(y = irs10yr), colour="#00BFFF") + 
+  xlab("years") + ylab("rate (%)") +
+  ggtitle("Interest Rate Swaps - Mexico")
+
+```
+
+
+In the following graphs, a relationship can be observed between the 10yr IRS and three other variables.
+
+First, it can be noted that the 10yr rate has a relation with the overnight rate. This makes sense as the one day rate is the base rate for the other ones as it is the one set by policy-makers.
+
+```{r graph one, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+#graph of the historical values of the overnight rate and the 10yr swap
+dat %>%
+  ggplot(aes(x = date)) +
+  geom_line(aes(y = overnight), colour="#000000") +
+  geom_line(aes(y = irs10yr), colour="#2F4F4F") +
+  xlab("years") + ylab("rate (%)") +
+  ggtitle("Interest Rates (10yr and overnight)  - Mexico")
+```
+
+Second, a relationship appears between 10yrs from Mexico and US. Mexico's economy is dependent on US economy and so is the monetary policy. The Bank of Mexico watches closely US rates (and also inflation, growth, and other factors) in order to set the monetary policy rate.
+
+```{r graph two, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+
+dat %>%
+  ggplot(aes(x = date)) +
+  geom_line(aes(y = irs10yr), colour="#2F4F4F") +
+  geom_line(aes(y = us10yr), colour="#778899") +
+  xlab("years") + ylab("rate (%)") +
+  ggtitle("Interest Rates (10yr)  - Mexico and US")
+```  
+
+Finally, a positive relation appears between the 10yr rate and the foreign exchange rate (USDMXN). Both variables are often regarded as a measure of risk for the Mexican assets. When the MXN appreciates against the dollar, it goes down in the graph. The same is true for the interest rate.
+
+```{r graph three, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+
+dat %>%
+  ggplot(aes(x = date)) +
+  geom_line(aes(y = irs10yr), colour="#2F4F4F") +
+  geom_line(aes(y = mxn), colour="#778899") +
+  xlab("years") +
+  ggtitle("Interest Rates and FX  - Mexico") + 
+  scale_y_continuous(
+    name = "rate (%)",
+    sec.axis = sec_axis(trans=~., name ="mxn") #for the secondary axis
+  )
+
+```
+
+These relationships will be useful later when the models are derived.
+
+
+
+### 2.2 Data Preparation
+
+Now, the dataset is partitioned in training and dataset. The first one will comprise 80% of the dataset. 
+
+```{r splitting the dataset, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+#we will create a data partition in training and testing sets
+#that is suitable for time series analysis, the train set comprises
+#the first 80% of the data time ordered
+
+set.seed(31416, sample.kind = "Rounding")
+test_index <- createDataPartition(dat$irs3m, times = 1, p = 0.2, list = FALSE) # create a 20% test set
+test_set <- dat[test_index,]
+train_set <- dat[-test_index,]
+```
+
+### 2.3 Model Evaluation
+
+The model performance is going to be evaluated through the RMSE (residual mean square error). The function is defined as follows:
+
+$$
+\mbox{RMSE} = \sqrt{\frac{1}{N} \sum_{t}^{} \left( \hat{y}_{t} - y_{t} \right)^2 }
+$$
+
+
+Let $y_{t}$ be defined as the rate at time  $t$ and denote our prediction with $\hat{y}_{t}$, with $N$ being the number of time/node combinations and the sum occurring over all the series.
+
+The RMSE is similar to a standard deviation: it is the typical error that is made when predicting a given node for a specific date. It translates in basis points (bps). For example, if the RMSE is 0.10, it means that the error made is from 10bps, which means an estimate of 5.50 instead of the true value of 5.60.
+
+
+### 2.4 Base Model
+
+After analysing the data, it is possible to define a base model. The one that will be the benchmark for the other, more complex, models.
+
+Since we explored the relation between 10yr rates and overnight rate. A model which considers this plus a constant spread will be proposed. In this manner, the relationship could be explained with nothing more than a base rate, a constant.
+
+Thus, this relationship can be modelled as follows:
+
+$$
+\hat{y}_{t} = \beta_{0} + \beta_{1,t}x_{1,t}  + \varepsilon_{t}
+$$
+Let $\hat{y}_{t}$ be our estimate of the 10yr irs rate based on a constant $\beta_{0}$, a linear term where $\beta_{1,t}$ is the effect derived from the overnight rate and $\varepsilon_{t}$ is the error term due to randomness.
+
+
+```{r base model, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+#base model
+set.seed(1, sample.kind = "Rounding")
+train_lm_1 <- train(irs10yr ~ overnight
+                    , method = "lm", data = train_set) 
+#a linear model with only one variable and with intercept using the training set
+```
+
+The coefficients of the first model are presented:
+
+```{r baseline model coefficients, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+#we observe the coefficients of the first model
+train_lm_1[["finalModel"]][["coefficients"]] 
+```
+
+The 10yr rate is basically explained by a fixed number and a spread vs the overnight rate.
+
+
+Now, we extract the RMSE on the train set and observe a rather big error of 0.62. This means that the model does not do a good job predicting the 10yr interest rate. The error would be of 62 basis points (bps), which is huge for interest rates. However, now we have a starting point.
+
+
+```{r RMSE baseline model, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+train_lm_1[["results"]][["RMSE"]] #displays the RMSE for the triaing set
+```
+
+### 2.5 Economic Model
+
+As we noted above, the 10-year Mexican rate is correlated to the US 10-year rates, to the overnight Mexican rate and to the USDMXN exchange rate. In this section we will derive a model that tries to capture this information:
+
+We do not use the intercept since we are trying to explain the variable using exclusively other variables.
+
+```{r 2nd  model, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+set.seed(1, sample.kind = "Rounding")
+#linear model using 4 variables and without intercept
+train_lm_2 <- train(irs10yr ~ overnight + fed + us10yr + mxn
+                    , method = "lm", data = train_set,
+                    tuneGrid  = expand.grid(intercept = FALSE))
+
+```
+
+The coefficients of the second model are presented:
+
+```{r second model coefficients, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+#displays the coefficients of the second model
+train_lm_2[["finalModel"]][["coefficients"]]
+```
+
+In this model, the overnight Mexican rate, the 10yr US rate and exchange rate have a positive correlation with the 10yr IRS rate, whereas the Fed funds rate has a negative impact.
+
+
+The RMSE from the train set is presented: 29bps, this model is twice as good as the base model according to the RMSE.
+
+```{r 2nd  model RMSE, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+#get RMSE
+train_lm_2[["results"]][["RMSE"]]
+```
+
+
+### 2.6 Linear Model
+
+In this model, the 10yr IRS rate is estimated using all the data available. 
+
+```{r linear  model all variables, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+#liner model using all the variables and without intercept
+set.seed(1, sample.kind = "Rounding")
+train_lm_3 <- train(irs10yr ~ .
+                  ,method = "lm", data = train_set,
+                  tuneGrid  = expand.grid(intercept = FALSE))
+```
+
+The coefficients of the third model are presented:
+
+```{r linear model coefficients, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+#this will display the coefficients of all the variables
+train_lm_3[["finalModel"]][["coefficients"]]
+```
+
+The train set RMSE has a substantial improvement to 2.45bps
+
+```{r linear model rmse training set, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+#glance at the model
+train_lm_3[["results"]][["RMSE"]]
+```
+
+
+
+### 2.7 Principal Components Analysis
+
+The fourth model that will be presented is a Principal Component Analysis (PCA) using only the IRS curve. The correlation between all the variables is presented here.
+
+```{r  correlation, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+#correlation between all IRS 
+cor(train_set[,2:11])
+```
+
+As we can see, the correlation between all the IRS is very high. We will limit the model to the IRS curve since an economic explanation can be applied to the first three components.
+
+A dimension reduction algorithm is applied to the data.
+
+```{r  PCA, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+#pca
+x <- train_set[,2:11] %>% as.matrix() #we set the IRS curve as an x matrix
+pca <- prcomp(x) 
+summary(pca)
+```
+
+It can be observed that the first three principal components explain 99.944% of the variation of the total data. As supported by the literature, 
+
+The PC1 one correspond to the level of the curve, which means that it approximates the funding rate (Banco de Mexico policy rate or overnight rate).
+
+```{r PC1, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+plot(pca$x[,1], train_set$overnight)
+cor(pca$x[,1], train_set$overnight)
+```
+
+
+The PC2 correspond to the slope of the curve. In this case, the slope between the 10yr and 2yr instruments is graphed along with the correlation. It is not as strong as the previous PC1 relation to the overnight rate.
+
+```{r PC2, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+plot(pca$x[,2], train_set$irs10yr - train_set$irs2yr)
+cor(pca$x[,2], train_set$irs10yr - train_set$irs2y)
+
+```
+
+The PC3 correspond to the convexity of the curve. This one is traditionally approximated by a strategy called a fly, which implies buying the 2yr and 10yr instruments and selling the 5yr instrument. As the correlation and graph shows, it is not a good approximation of the PC3.
+
+```{r PC3, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+plot(pca$x[,3], train_set$irs2yr - train_set$irs5yr + train_set$irs10yr)
+cor(pca$x[,3], train_set$irs2yr - train_set$irs5yr + train_set$irs10yr)
+```
+
+
+#### 2.7.1 Residuals
+
+In order to compare this model to the previous ones, a RMSE should be computed.
+
+
+```{r residuals for PCA, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+# we will extract the pcas and the rotation matrix
+pc1to3 <- pca$x[,1:3] 
+pc_rot <- pca$rotation[,1:3]
+
+
+#create a function to compute the reconstructed curve with the pca
+curvapca <- function(i) {
+  rowSums(pc1to3[i,]*(pc_rot))+pca$center
+}
+
+# create a matrix of the curve
+curva_con_pca <-  data.frame(t(sapply(seq(1:nrow(train_set)), curvapca)))
+
+#then we can compute the squared residuals
+pca_rmse <- sqrt(colSums((x - curva_con_pca)^2)/nrow(train_set))
+pca_rmse
+
+#now we compute the dispersion of the data
+dispersion <- (x - curva_con_pca)
+
+#this show us the residuals
+boxplot(dispersion)
+
+```
+
+As can be noted in the boxplot of the residuals and in the computation of the residual mean square error (RMSE), there is large variability in the following nodes: 6m, 9m, 2yr, 5yr and 7yr. 
+
+However, the model does provide a good estimate for the 10yr node. This could be explained by various reasons, but one of them is that the 10yr is a benchmark node and hence it is highly liquid in the market, whereas other nodes are not so liquid. The RMSE in the training set is about 4bps.
+
+
+```{r residuals for PCA 10yr, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+
+pca_rmse[10] #display only the residual por the 10yr irs
+
+```
+
+
+### 2.8 K Nearest Neighbours 
+
+The next model we will implement is a K-Nearest Neighbours approach.
+
+```{r knn model, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+# we will extract the pcas and the rotation matrix
+set.seed(1, sample.kind = "Rounding")
+train_knn <- train(irs10yr ~ ., method = "knn", data = train_set,
+                   tuneGrid = data.frame(k = seq(1, 11 , 1)))
+train_knn$bestTune
+
+plot(train_knn)
+
+```
+
+In order to get the best fit, cross-validation is used to find that when we set k = 2 we minimise our loss function to 7.5bps in the training set.
+
+```{r knn model RMSE, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+#we minimise the RMSE
+min(train_knn[["results"]][["RMSE"]])
+```
+
+### 2.9 Random Forest
+
+Finally, a random forest model is implemented.
+
+```{r random forest model, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+
+####random forest######
+set.seed(1, sample.kind = "Rounding")
+train_rf <- train(irs10yr ~ ., method = "rf", data = train_set,
+                  tuneGrid = data.frame(mtry = seq(1, 15, 1)), ntree = 100)
+train_rf$bestTune
+
+ggplot(train_rf)
+
+#and get the best rmse
+min(train_rf[["results"]][["RMSE"]])
+```
+
+As can be seen, a mtry = 10 is chosen to minimise the loss function, which yields an RMSE in the training set of 2.85bps.
+
+
+## 3 Validation and Results
+
+After carefully estimate the models and calibrate them, it is possible to start the validation process using the test set. In this manner, the models can be compared in term of RMSE and a model can be chosen.
+
+For the first model (baseline model), predictions can be derived from the following manner:
+
+```{r  predictions from baseline model, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+#correlation between all IRS 
+y_hat_lm_1 <- predict(train_lm_1, test_set, type = "raw") 
+```
+
+Then, an RMSE is calculated for this baseline model using the test set. 
+
+
+```{r  RMSE from baseline model, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+#this would be for the validation
+base_model_rmse <- sqrt(sum((test_set$irs10yr - y_hat_lm_1)^2)/nrow(test_set))
+base_model_rmse
+```
+
+
+The results are stored for comparison in the next table:
+
+```{r store baseline model RMSE results, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+rmse_results <- tibble(method = "Baseline Model", RMSE = base_model_rmse)
+```
+
+It can be observed that the model does not do a good job fitting the data:
+
+```{r  plot fitted baseline model, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+#this would be for the validation
+plot(y_hat_lm_1, test_set$irs10yr)
+```
+
+For the second model (economic model) a similar process can be achieved.
+First, the predictions are estimated using the trained model and then an RMSE is estimated for the test set. A plot is also presented. Now, it can be noted that this model does a better job than the base model.
+
+```{r  economic model validation, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+y_hat_lm_2 <- predict(train_lm_2, test_set, type = "raw")
+second_model_rmse <- sqrt(sum((test_set$irs10yr - y_hat_lm_2)^2)/nrow(test_set))
+second_model_rmse
+plot(y_hat_lm_2, test_set$irs10yr)
+```
+
+
+The results are stored:
+
+```{r store second model RMSE results, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+
+rmse_results <- bind_rows(rmse_results,
+                          tibble(method="Economic Model", RMSE = second_model_rmse))
+```
+
+
+For the third model (linear model including all variables) a similar process can be achieved.
+First, the predictions are estimated using the trained model and then an RMSE is estimated for the test set. A plot is also presented.
+
+```{r  linear model validation, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+y_hat_lm_3 <- predict(train_lm_3, test_set, type = "raw")
+third_model_rmse <- sqrt(sum((test_set$irs10yr - y_hat_lm_3)^2)/nrow(test_set))
+third_model_rmse
+plot(y_hat_lm_3, test_set$irs10yr)
+```
+
+
+The results are stored:
+
+```{r store third model RMSE results, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+
+rmse_results <- bind_rows(rmse_results,
+                          tibble(method="Linear Model",  
+                                 RMSE = third_model_rmse))
+```
+
+For the fourth model (PCA model) a similar process can be achieved.
+First, the predictions are estimated using the trained model and then an RMSE is estimated for the test set. A plot is also presented.
+
+```{r  PCA validation, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+#compute pca in test set
+x <- test_set[,2:11] %>% as.matrix()
+pca <- prcomp(x)
+
+#computing residuals
+# we will extract the pcas and the rotation matrix
+pc1to3 <- pca$x[,1:3] 
+pc_rot <- pca$rotation[,1:3]
+
+# create a matrix of the curve
+curva_con_pca <-  data.frame(t(sapply(seq(1:nrow(test_set)), curvapca)))
+
+#then we can compute the squared residuals
+pca_rmse <- sqrt(colSums((x - curva_con_pca)^2)/nrow(test_set))
+fourth_model_rmse <- pca_rmse[10]
+fourth_model_rmse
+
+
+y_hat_pca <- as.numeric(unlist(curva_con_pca[10]))
+plot(y_hat_pca, test_set$irs10yr)
+```
+
+
+The results are stored:
+
+```{r store fourth RMSE results, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+
+rmse_results <- bind_rows(rmse_results,
+                          tibble(method="PCA Model",  
+                                 RMSE = fourth_model_rmse))
+```
+
+
+For the fifth model (KNN) a similar process can be achieved.
+First, the predictions are estimated using the trained model and then an RMSE is estimated for the test set. A plot is also presented.
+
+```{r  knn validation, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+y_hat_knn <- predict(train_knn, test_set, type = "raw")
+fifth_model_rmse <- sqrt(sum((test_set$irs10yr - y_hat_knn)^2)/nrow(test_set))
+fifth_model_rmse
+plot(y_hat_knn, test_set$irs10yr)
+```
+
+
+The results are stored:
+
+```{r store fifth RMSE results, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+
+rmse_results <- bind_rows(rmse_results,
+                          tibble(method="K Nearest Neighbours Model",  
+                                 RMSE = fifth_model_rmse))
+```
+
+For the sixth model (RF) a similar process can be achieved.
+First, the predictions are estimated using the trained model and then an RMSE is estimated for the test set. A plot is also presented.
+
+```{r  rf validation, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+y_hat_rf <- predict(train_rf, test_set, type = "raw")
+sixth_model_rmse <- sqrt(sum((test_set$irs10yr - y_hat_rf)^2)/nrow(test_set))
+sixth_model_rmse
+plot(y_hat_rf, test_set$irs10yr)
+```
+
+
+The results are stored:
+
+```{r store sixth model RMSE results, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+
+rmse_results <- bind_rows(rmse_results,
+                          tibble(method="Random Forest Model",  
+                                 RMSE = sixth_model_rmse))
+```
+
+This is the final summary of the results
+```{r table with RMSE, echo=FALSE, message = FALSE, warning = FALSE, eval = TRUE}
+rmse_results 
+if(knitr::is_html_output()){
+  knitr::kable(rmse_results, "html") %>%
+    kableExtra::kable_styling(bootstrap_options = "striped", full_width = FALSE)
+} else{
+  knitr::kable(rmse_results, "latex", booktabs = TRUE) %>%
+    kableExtra::kable_styling(font_size = 8)
+}
+```
+
+
+## 4 Conclusion
+
+This paper has implemented six different models to estimate the 10 year IRS rate. Three of those models area linear models and three of them are machine learning models.
+
+With respect to the linear models:
+
+* The baseline model performs rather poorly (RMSE: 63bps) but it makes sense to estimate the 10 year rate with nothing but the overnight rate. 
+  
+* The economic model uses theoretical relationships between interest rates, exchange rate, foreign interest rates and maturity. It yields better results but if implemented it would be used as a long-term model due to its short-term biases that tend to prevail during short term windows (RMSE: 28.4bps).
+
+* The linear model that includes all the variables performs rather good (RMSE:2.4bps). Indeed it is the second best model. However, it requires a lot of variables as inputs. This is actually a problem for all the other models but the PCA. In terms of time of computing it is also efficient and in practice it would make an ideal model for short term estimates.
+
+* The PCA model performs a little worst than the linear model (RMSE: 4bps) but it could be handy in practice as it only requires the IRS curve to provide a good estimate of the 10 year rate.
+
+* The KNN model has an RMSE of 5.9bps. It does not outperform the linear model and it does require all the variables for its estimation. In consequence, it would not be the first choice when estimating rates.
+
+* Finally, the Random Forest model outperforms all the other models with an RMSE of 2.2bps. However its time consuming and it is only slightly better than the linear model. Furthermore, it uses all the variables to achieve this RMSE. In practice it would be better to habe a slighly worst model in terms of RMSE but quite faster, such as the PCA or the linear model.
+
+
+Even if the Random Forest Model outperforms the other ones, in practice it would be useful to use more cost efficient models such as PCA or linear models. The models developed provide a statistical basis for estimation of the 10 year rate. It could further expand in the direction of a more theoretically sound model of the 10yr rate, including other variables such as inflation, equity index and so on.
